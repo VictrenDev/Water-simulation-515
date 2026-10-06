@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI-Based Water-Level Control — Live Fuzzy (Mamdani) Simulation</title>
+<style>
+  :root{
+    --bg:#0e1220; --panel:#16202e; --edge:#2a3a52; --good:#36d399; --warn:#f2b64d;
+    --bad:#ef5465; --txt:#dfe7f5; --dim:#8fa3bd; --accent:#4aa3ff;
+  }
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--txt);font-family:'Segoe UI',Tahoma,Arial,sans-serif;margin:0}
+  header{
+    background:linear-gradient(90deg,#12223a,#1b3350);padding:10px 18px;border-bottom:1px solid var(--edge);
+  }
+  header h1{font-size:1.05rem;margin:0;color:#fff}
+  header p{font-size:.78rem;margin:2px 0 0 0;color:var(--dim)}
+  #layout{display:grid;grid-template-columns:360px auto;gap:14px;padding:12px;align-items:start}
+  .panel{background:var(--panel);border:1px solid var(--edge);border-radius:10px;padding:10px}
+  .panel h2{font-size:.85rem;margin:0 0 6px 0;color:var(--accent);letter-spacing:.4px}
+  #readouts{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;font-size:.8rem}
+  #readouts b{display:block;color:var(--dim);font-size:.68rem;text-transform:uppercase;letter-spacing:.3px}
+  #readouts div{background:#1d2a3d;border:1px solid var(--edge);border-radius:6px;padding:4px 8px}
+  .ctrl{display:grid;grid-template-columns:150px 1fr 64px;gap:6px;align-items:center;font-size:.78rem;margin:2px 0 6px 0}
+  .ctrl label{color:var(--txt)}
+  .ctrl output{color:var(--good);text-align:right}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  button{background:var(--accent);border:none;color:#fff;padding:7px 14px;border-radius:7px;cursor:pointer;font-weight:600;margin:0 6px}
+  button.green{background:var(--good)} button.red{background:var(--bad)} button.amber{background:var(--warn);color:#222}
+  #rulesTable{border-collapse:collapse;margin-top:8px;font-size:.72rem}
+  #rulesTable td{border:1px solid #33415c;width:30px;height:26px;text-align:center;font-size:.64rem;color:var(--dim);background:#151d2c}
+  #rulesTable td.hot{background:var(--good);color:#062b12;font-weight:700}
+  #rulesTable td.warm{background:var(--warn);color:#33230a}
+  legend{font-size:.7rem;color:var(--dim);margin-top:4px}
+  .badge{display:inline-block;background:var(--accent);color:#fff;border-radius:4px;padding:0 6px;font-size:.68rem;margin-left:6px}
+  canvas{display:block;margin:0 auto}
+  #chartWrap{background:#1d2a3d;border:1px solid var(--edge);border-radius:8px;padding:6px}
+  .note{font-size:.68rem;color:var(--dim);line-height:1.35}
+</style>
+</head>
+<body>
+<header>
+  <h1>AI-Based Water-Level Control <span class="badge">Live Fuzzy (Mamdani) Simulation</span></h1>
+  <p>Tank + pump plant (A·dh/dt = Qin − Qout, Qout = k·β·√h) · Fuzzy PD with integral action · 49-rule inference · centroid defuzzification</p>
+</header>
+
+<div id="layout">
+  <div class="panel" style="width:360px">
+    <h2>Plant & Controller View</h2>
+    <canvas id="tank" width="336" height="360"></canvas>
+    <div id="readouts">
+      <div><b>time (s)</b><span id="ro_t">0.0</span></div>
+      <div><b>level h (m)</b><span id="ro_h">0.000</span></div>
+      <div><b>setpoint (m)</b><span id="ro_sp">0.500</span></div>
+      <div><b>error e (m)</b><span id="ro_e">0.000</span></div>
+      <div><b>de/dt (m/s)</b><span id="ro_de">0.000</span></div>
+      <div><b>pump u (0-1)</b><span id="ro_u">0.000</span></div>
+      <div><b>Q in (m³/s)</b><span id="ro_qin">0.00000</span></div>
+      <div><b>Q out (m³/s)</b><span id="ro_qout">0.00000</span></div>
+    </div>
+    <h2 style="margin-top:8px">Rule base ON-state (7×7, error × rate)</h2>
+    <table id="rulesTable"></table>
+  </div>
+
+  <div style="display:flex;flex-direction:column">
+    <div class="panel">
+      <h2>Controls</h2>
+      <div class="ctrl"><label>Setpoint h_sp</label><input type="range" id="c_sp" min="0.10" max="0.90" step="0.01" value="0.50"><output id="o_sp">0.50 m</output></div>
+      <div class="ctrl"><label>Tank area A</label><input type="range" id="c_A" min="0.40" max="2.00" step="0.05" value="1.00"><output id="o_A">1.00 m²</output></div>
+      <div class="ctrl"><label>Outflow β</label><input type="range" id="c_beta" min="0.005" max="0.040" step="0.001" value="0.020"><output id="o_beta">0.020</output></div>
+      <div class="ctrl"><label>Disturbance k</label><input type="range" id="c_k" min="0.50" max="2.00" step="0.05" value="1.00"><output id="o_k">1.00 ×</output></div>
+      <div class="ctrl"><label>Sensor noise</label><input type="range" id="c_noise" min="0" max="0.02" step="0.001" value="0.000"><output id="o_noise">0 m</output></div>
+      <div class="ctrl"><label>Sim speed</label><input type="range" id="c_speed" min="1" max="20" step="1" value="6"><output id="o_speed">6 ×</output></div>
+      <div style="margin-top:4px">
+        <button id="b_run" class="green">▶ Run</button>
+        <button id="b_dist" class="amber">Outlet +60%</button>
+        <button id="b_reset" class="red">↺ Reset</button>
+      </div>
+    </div>
+    <div class="panel" id="chartWrap" style="margin-top:10px">
+      <h2>Level history &mdash; h(t) vs setpoint</h2>
+      <canvas id="chart" width="640" height="240"></canvas>
+    </div>
+    <div class="panel" style="margin-top:10px">
+      <h2>How to use</h2>
+      <p class="note">
+        Press <b>Run</b> to start the live simulation. Drag the sliders at any time &mdash; change the
+        setpoint to watch tracking, raise <b>k</b> to emulate opening the outlet tap wider (load
+        disturbance), add <b>sensor noise</b>, or change the tank area. The rule table below the tank
+        lights up the currently-firing rules (green = strong, amber = weak). The fuzzy engine shown is
+        the same Mamdani inference used in <b>water_tank_fuzzy_control.js</b> and
+        <b>water_tank_fuzzy_control.m</b>.
+      </p>
+    </div>
+  </div>
+</div>
+<script>
+'use strict';
+/* ==================== 1. FUZZY ENGINE (same as the .js/.m files) ==================== */
+function tri(x,a,b,c){ if(x<=a||x>=c) return 0; if(x===b) return 1; if(x<b) return (x-a)/(b-a); return (c-x)/(c-b); }
+function trap(x,a,b,c,d){ if(x<=a||x>=d) return 0; if(x>=b&&x<=c) return 1; if(x<b) return (x-a)/(b-a); return (d-x)/(d-c); }
+const L = {NB:-3,NM:-2,NS:-1,ZE:0,PS:1,PM:2,PB:3};
+const LING = ['NB','NM','NS','ZE','PS','PM','PB'];
+const E_MF = [
+  {l:L.NB, f:x=>tri(x,-1.667,-1.0,-0.333)},{l:L.NM, f:x=>tri(x,-1.0,-0.667,-0.333)},
+  {l:L.NS, f:x=>tri(x,-0.667,-0.333,0)},{l:L.ZE, f:x=>tri(x,-0.333,0,0.333)},
+  {l:L.PS, f:x=>tri(x,0,0.333,0.667)},{l:L.PM, f:x=>tri(x,0.333,0.667,1)},
+  {l:L.PB, f:x=>tri(x,0.333,1,1.667)}];
+const U_MF = [
+  {l:L.NB, f:x=>trap(x,-0.30,-0.10,0,0.167)},{l:L.NM, f:x=>tri(x,-0.033,0.167,0.367)},
+  {l:L.NS, f:x=>tri(x,0.067,0.333,0.533)},{l:L.ZE, f:x=>tri(x,0.167,0.500,0.833)},
+  {l:L.PS, f:x=>tri(x,0.367,0.667,0.967)},{l:L.PM, f:x=>tri(x,0.533,0.833,1.033)},
+  {l:L.PB, f:x=>trap(x,0.833,1,1.1,1.3)}];
+const RULE = [
+  [L.NB,L.NB,L.NB,L.NB,L.NM,L.NS,L.ZE],
+  [L.NB,L.NB,L.NB,L.NM,L.NS,L.ZE,L.PS],
+  [L.NB,L.NB,L.NM,L.NS,L.ZE,L.PS,L.PM],
+  [L.NB,L.NM,L.NS,L.ZE,L.PS,L.PM,L.PB],
+  [L.NM,L.NS,L.ZE,L.PS,L.PM,L.PB,L.PB],
+  [L.NS,L.ZE,L.PS,L.PM,L.PB,L.PB,L.PB],
+  [L.ZE,L.PS,L.PM,L.PB,L.PB,L.PB,L.PB]];
+
+const ctrl = {Ke:0.10,Kde:0.03,Qmax:0.0285,Ki:0.030,Imax:25,intE:0,ePrev:undefined,u:0};
+function clampF(x,lo,hi){ return Math.max(lo,Math.min(hi,x)); }
+let lastFired = [];
+function fuzzyControl(e,de,dt){
+  const en = clampF(e/ctrl.Ke,-1,1), den = clampF(de/ctrl.Kde,-1,1);
+  const wE = E_MF.map(m=>m.f(en)), wD = E_MF.map(m=>m.f(den));
+  const fired = [];
+  for(let r=0;r<7;r++) for(let c=0;c<7;c++){
+    const w = Math.min(wE[r],wD[c]);
+    if(w>0.001) fired.push({out:RULE[r][c],w,r,c});
+  }
+  const N=500; let area=0, xArea=0;
+  for(let i=0;i<=N;i++){
+    const z=i/N; let agg=0;
+    for(const f of fired){ agg=Math.max(agg,Math.min(f.w,U_MF.find(m=>m.l===f.out).f(z))); }
+    area+=agg; xArea+=z*agg;
+  }
+  let z = area>1e-12 ? xArea/area : 0.5;
+  if(ctrl.Ki>0){
+    if(ctrl.ePrev!==undefined && e*ctrl.ePrev<0) ctrl.intE=0;
+    ctrl.ePrev=e;
+    if(z>0.01 && z<0.99) ctrl.intE=clampF(ctrl.intE+e*dt,-ctrl.Imax,ctrl.Imax);
+    z=clampF(z+ctrl.Ki*ctrl.intE,0,1);
+  }
+  ctrl.u=z; lastFired=fired;
+  return z*ctrl.Qmax;
+}
+
+/* ==================== 2. STATE (declared first - used by slider callbacks) ==================== */
+const P = {A:1.0, beta:0.020, k:1.0, noise:0.0, sp:0.5};
+const S = {t:0.0, h:0.0, prevE:0.5, deF:0.0, Qin:0, Qout:0};
+const SIM_DT = 0.02;             // physics step (s)
+const HIST = []; const HMAX=1.0; // tank overflow level (m)
+let running=false;
+
+/* ==================== 3. SLIDERS ==================== */
+function bind(id, cb, fmt){
+  const el=document.getElementById(id);
+  const outEl=document.getElementById('o_'+id.slice(2));
+  const refresh=()=>{ const v=parseFloat(el.value); outEl.textContent=fmt(v); cb(v); };
+  el.addEventListener('input',refresh); refresh();
+  return ()=>parseFloat(el.value);
+}
+const getSp    = bind('c_sp',   v=>P.sp=v, v=>v.toFixed(2)+' m');
+const getA     = bind('c_A',    v=>P.A=v,     v=>v.toFixed(2)+' m²');
+const getBeta  = bind('c_beta', v=>P.beta=v,  v=>v.toFixed(3));
+const getK     = bind('c_k',    v=>P.k=v,     v=>v.toFixed(2)+' ×');
+const getNoise = bind('c_noise',v=>P.noise=v, v=>v.toFixed(3)+' m');
+const getSpeed = bind('c_speed',v=>{},        v=>v+' ×');
+/* ==================== 4. RULE-TABLE VIEW ==================== */
+(function buildRuleTable(){
+  const tb = document.getElementById('rulesTable');
+  let s = '<tr><th></th>' + LING.map(l=>'<th>'+l+'</th>').join('') + '</tr>';
+  for(let r=0;r<7;r++){
+    s += '<tr><th>'+LING[r]+'</th>';
+    for(let c=0;c<7;c++){
+      s += '<td id="rule_'+r+'_'+c+'">'+LING[RULE[r][c]+3]+'</td>';
+    }
+    s += '</tr>';
+  }
+  tb.innerHTML = s;
+})();
+function updateRules(){
+  for(const f of lastFired){
+    const cell = document.getElementById('rule_'+f.r+'_'+f.c);
+    if(cell){ cell.className = f.w>0.5 ? 'hot' : 'warm'; }
+  }
+}
+
+/* ==================== 5. RENDERING ==================== */
+const tankCv = document.getElementById('tank');
+const tk = tankCv.getContext('2d');
+const chartCv = document.getElementById('chart');
+const ck = chartCv.getContext('2d');
+const ro = id => document.getElementById('ro_'+id);
+
+function renderTank(){
+  const W=336, H=360;
+  const tw=170, tx=100, ty=38, th=272;         // tank box (inner)
+  tk.clearRect(0,0,W,H);
+  tk.fillStyle='#0d1524'; tk.fillRect(0,0,W,H);
+  const hFrac = S.h/HMAX;                       // 0..1
+  const wy = ty+th-(hFrac*th);                  // water surface y
+  const grad = tk.createLinearGradient(0,wy,0,ty+th);
+  grad.addColorStop(0,'#2e86de'); grad.addColorStop(1,'#14548e');
+  tk.fillStyle=grad;
+  tk.fillRect(tx,wy,tw,th*hFrac);
+  tk.strokeStyle='#9fb4d8'; tk.lineWidth=4;     // walls
+  tk.strokeRect(tx-4,ty-4,tw+8,th+8);
+  const spy = ty+th-(P.sp/HMAX)*th;             // setpoint line
+  tk.strokeStyle='#f2b64d'; tk.lineWidth=1; tk.setLineDash([6,4]);
+  tk.beginPath(); tk.moveTo(tx-10,spy); tk.lineTo(tx+tw+10,spy); tk.stroke();
+  tk.setLineDash([]);
+  tk.fillStyle='#f2b64d'; tk.font='11px Segoe UI';
+  tk.fillText('setpoint '+P.sp.toFixed(2), tx+tw+12, spy-4);
+  tk.fillStyle='#8fa3bd';                       // scale
+  tk.fillText('1.0', tx-22, ty+4); tk.fillText('0.5', tx-22, ty+th/2);
+  tk.fillText('0', tx-18, ty+th+4);
+  // pump (left), brightness follows u
+  const px=46, py=ty+th-14;
+  tk.fillStyle='#0d1524'; tk.fillRect(24,py-26,44,52);
+  tk.strokeStyle='#9fb4d8'; tk.lineWidth=2; tk.strokeRect(24,py-26,44,52);
+  const gr=Math.round(60+ctrl.u*160);
+  tk.fillStyle='rgb('+gr+','+Math.round(230-40*ctrl.u)+','+Math.round(120-60*ctrl.u)+')';
+  tk.beginPath(); tk.arc(px, py-4, 13, 0, 2*Math.PI); tk.fill();
+  tk.fillStyle='#0d1524'; tk.font='10px Segoe UI'; tk.textAlign='center';
+  tk.fillText('PUMP', px, py-24); tk.fillText(Math.round(ctrl.u*100)+'%', px, py-6);
+  tk.strokeStyle='#2e86de'; tk.lineWidth=3+10*ctrl.u;
+  tk.beginPath(); tk.moveTo(px, py-4); tk.lineTo(tx, py-4); tk.stroke();
+  if(ctrl.u>0.03){                              // inflow droplets
+    tk.fillStyle='#2e86de';
+    for(let i=0;i<4;i++){
+      const bx=tx-12-i*10, by=py-10+((S.t*8+i*9)%14);
+      tk.beginPath(); tk.arc(bx, by, 2, 0, 2*Math.PI); tk.fill();
+    }
+  }
+  // outlet pipe + outflow indication
+  const ox=tx+tw, oy=ty+th-4;
+  tk.strokeStyle='#3d5a80'; tk.lineWidth=12;
+  tk.beginPath(); tk.moveTo(ox,oy); tk.lineTo(ox+24,oy); tk.stroke();
+  tk.lineWidth=4; tk.beginPath(); tk.moveTo(ox+24,oy); tk.lineTo(ox+24,oy+26); tk.stroke();
+  if(S.Qout>1e-4){
+    tk.strokeStyle='#36d399'; tk.lineWidth=2;
+    const n=Math.max(2, Math.round(S.Qout/0.03*10));
+    for(let i=0;i<n;i++){
+      const yy=oy+30+((S.t*9+i*11)%18);
+      tk.beginPath(); tk.moveTo(ox+26,yy-5); tk.lineTo(ox+22,yy+3); tk.stroke();
+    }
+  }
+  tk.fillStyle='#fff'; tk.font='bold 14px Segoe UI'; tk.textAlign='left';
+  tk.fillText('h = '+S.h.toFixed(3)+' m', tx+4, ty+18);
+  tk.textAlign='left';
+}
+function renderChart(){
+  const W=chartCv.width, H=chartCv.height;
+  ck.clearRect(0,0,W,H);
+  ck.fillStyle='#1d2a3d'; ck.fillRect(0,0,W,H);
+  const maxN=640;
+  const xOf=i=> i/maxN*W;
+  const yOf=v=> H-8-(v/HMAX)*(H-20);
+  ck.strokeStyle='#f2b64d'; ck.setLineDash([5,4]); ck.lineWidth=1;
+  ck.beginPath(); ck.moveTo(0,yOf(P.sp)); ck.lineTo(W,yOf(P.sp)); ck.stroke();
+  ck.setLineDash([]);
+  ck.strokeStyle='#2a3a52'; ck.lineWidth=1;
+  for(let g=0; g<=4; g++){ const y=yOf(g*0.25); ck.beginPath(); ck.moveTo(0,y); ck.lineTo(W,y); ck.stroke(); }
+  const n=HIST.length;
+  ck.strokeStyle='#4aa3ff'; ck.lineWidth=2; ck.beginPath();
+  for(let i=0;i<n;i++){
+    const x=xOf(HIST.length-maxN+i), y=yOf(HIST[i].h);
+    if(i===0||HIST.length-maxN+i<=0) ck.moveTo(x,y); else ck.lineTo(x,y);
+  }
+  ck.stroke();
+  ck.fillStyle='#8fa3bd'; ck.font='10px Segoe UI';
+  ck.fillText('h (m)', 4, 10); ck.fillText('1.0', 4, yOf(1.0)+3);
+  ck.fillText('0.5', 4, yOf(0.5)+3); ck.fillText('0', 4, yOf(0)+3);
+  ck.fillStyle='#f2b64d'; ck.fillText('setpoint', W-70, yOf(P.sp)-4);
+  ck.fillStyle='#4aa3ff'; ck.fillText('h(t)', W-40, 10);
+}
+
+/* ==================== 6. MAIN LOOP ==================== */
+function step(){
+  const sp = P.sp;
+  const noise = (Math.random()*2-1)*P.noise;
+  const hMeas = S.h + noise;
+  const e = sp - hMeas;
+  const de = (e - S.prevE)/SIM_DT;
+  S.deF = 0.5*de + 0.5*S.deF;
+  S.Qin = fuzzyControl(e, S.deF, SIM_DT);
+  S.Qout = P.k*P.beta*Math.sqrt(Math.max(S.h,0));
+  S.h = Math.max(0, Math.min(HMAX, S.h + (S.Qin - S.Qout)/P.A*SIM_DT));
+  S.prevE = e;
+  S.t += SIM_DT;
+  HIST.push({t:S.t, h:S.h});
+  if(HIST.length>2500) HIST.shift();
+}
+
+function frame(){
+  const steps = Math.round(getSpeed());
+  for(let i=0;i<steps;i++) step();
+  ro('t').textContent = S.t.toFixed(1);
+  ro('h').textContent = S.h.toFixed(3);
+  ro('sp').textContent = P.sp.toFixed(3);
+  ro('e').textContent = (P.sp-S.h).toFixed(3);
+  ro('de').textContent = S.deF.toFixed(4);
+  ro('u').textContent = ctrl.u.toFixed(3);
+  ro('qin').textContent = S.Qin.toFixed(5);
+  ro('qout').textContent = S.Qout.toFixed(5);
+  renderTank(); renderChart(); updateRules();
+}
+
+/* ==================== 7. CONTROLS ==================== */
+const bRun=document.getElementById('b_run');
+let timer=null;
+function start(){ if(!running){ running=true; bRun.textContent='❚❚ Pause'; bRun.classList.remove('green'); bRun.classList.add('red'); timer=setInterval(frame,33);} }
+function pause(){ if(running){ running=false; bRun.textContent='▶ Run'; bRun.classList.remove('red'); bRun.classList.add('green'); clearInterval(timer); timer=null; } }
+bRun.addEventListener('click', ()=> running?pause():start());
+// Auto-run + scenario presets via query string (used for report screenshots)
+(function initFromQuery(){
+  const q = new URLSearchParams(location.search);
+  function setVal(id, v){ const el=document.getElementById(id); if(el){ el.value=v; el.dispatchEvent(new Event('input')); } }
+  if(q.get('noise')) setVal('c_noise', q.get('noise'));
+  if(q.get('k'))     setVal('c_k', q.get('k'));
+  if(q.get('sp'))    setVal('c_sp', q.get('sp'));
+  if(q.get('beta'))  setVal('c_beta', q.get('beta'));
+  if(q.get('autorun') === '1') setTimeout(start, 300);
+})();
+document.getElementById('b_reset').addEventListener('click', ()=>{
+  pause(); S.t=0; S.h=0; S.prevE=P.sp; S.deF=0; S.Qin=0; S.Qout=0;
+  ctrl.intE=0; ctrl.ePrev=undefined; ctrl.u=0; HIST.length=0;
+  frame();
+});
+document.getElementById('b_dist').addEventListener('click', ()=>{
+  P.k = (P.k<1.4) ? 1.6 : 1.0;
+  document.getElementById('c_k').value = P.k;
+  document.getElementById('o_k').textContent = P.k.toFixed(2)+' ×';
+});
+frame(); // initial drawing
+</script>
+</body>
+</html>
